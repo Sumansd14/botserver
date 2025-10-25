@@ -1,3 +1,12 @@
+# main.py
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def home():
+    return {"message": "Server is running!"}
+
 def send_email_notification(data: dict):
     sender = os.getenv("OWNER_EMAIL")
     app_pw = os.getenv("GMAIL_APP_PASSWORD")
