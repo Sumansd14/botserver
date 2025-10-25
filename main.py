@@ -1,31 +1,29 @@
-=import os, ssl, smtplib, logging
+import os
+import ssl
+import smtplib
+import logging
 from typing import List, Dict, Any
-
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-# ----- logging so you can see what's happening on Render -----
+# Logging setup
 logging.basicConfig(level=logging.INFO, force=True)
 log = logging.getLogger("botserver")
 
 app = FastAPI(title="Botserver")
 
-# ----- data model -----
+# Data model
 class Lead(BaseModel):
     name: str
     phone: str
     message: str
 
-def to_dict(obj: Lead) -> Dict[str, Any]:
-    """Pydantic v1/v2 compatible."""
-    return obj.model_dump() if hasattr(obj, "model_dump") else obj.dict()
-
-# simple in-memory store (replace with DB later)
+# In-memory store
 LEADS: List[Dict[str, Any]] = []
 
-
-# ----- routes -----
 @app.get("/")
 def home():
     return {"message": "Server is running!"}
@@ -47,7 +45,11 @@ def form():
           e.preventDefault();
           const f = e.target;
           const payload = {name:f.name.value, phone:f.phone.value, message:f.message.value};
-          const r = await fetch('/lead', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+          const r = await fetch('/lead', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify(payload)
+          });
           document.getElementById('out').textContent = await r.text();
           f.reset();
         }
@@ -57,16 +59,11 @@ def form():
 
 @app.post("/lead")
 def capture_lead(lead: Lead, background_tasks: BackgroundTasks):
-    data = to_dict(lead)
+    data = lead.dict()
     LEADS.append(data)
     log.info(f"[lead] captured: {data}")
-
     if os.getenv("SEND_EMAIL", "0") in ("1", "true", "TRUE"):
-        log.info("[lead] queueing background email task")
         background_tasks.add_task(send_email_safe, data)
-    else:
-        log.info("[lead] SEND_EMAIL is off; skipping email")
-
     return {"status": "success", "message": f"Lead captured for {data['name']}"}
 
 @app.get("/leads")
@@ -83,7 +80,6 @@ def env_check():
 
 @app.post("/debug-send")
 def debug_send():
-    """Direct test without background; returns the result in the response."""
     test = {"name": "Debug", "phone": "000", "message": "Test email path"}
     try:
         send_email_notification(test)
@@ -91,44 +87,28 @@ def debug_send():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-
-# ----- email helpers -----
 def send_email_safe(data: dict):
     try:
-        log.info(f"[email] starting background send for {data.get('name')}")
         send_email_notification(data)
-        log.info(f"[email] sent OK to {os.getenv('OWNER_EMAIL')}")
     except Exception as e:
         log.error(f"[email error] {e}")
 
 def send_email_notification(data: dict):
-    """
-    Sends via Gmail. Tries port 587 (STARTTLS) first, then falls back to 465 (SSL).
-    Env needed: OWNER_EMAIL, GMAIL_APP_PASSWORD
-    """
     sender = os.getenv("OWNER_EMAIL")
     app_pw = os.getenv("GMAIL_APP_PASSWORD")
     if not sender or not app_pw:
         raise RuntimeError("Email env vars not set")
 
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"New Lead from {data.get('name','')}"
+    msg["Subject"] = f"New Lead from {data.get('name', '')}"
     msg["From"] = sender
     msg["To"] = sender
-    text = (
-        "New lead captured:\n\n"
-        f"Name: {data.get('name')}\n"
-        f"Phone: {data.get('phone')}\n"
-        f"Message: {data.get('message')}\n"
-    )
+
+    text = f"New lead captured:\\n\\nName: {data.get('name')}\\nPhone: {data.get('phone')}\\nMessage: {data.get('message')}\\n"
     msg.attach(MIMEText(text, "plain"))
 
     ctx = ssl.create_default_context()
-
-    # Try 587 (STARTTLS)
+    # Try port 587 first
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=12) as server:
             server.ehlo()
@@ -138,8 +118,7 @@ def send_email_notification(data: dict):
         return
     except OSError as e:
         log.warning(f"[email warn] 587 failed: {e}")
-
-    # Fallback to 465 (SSL)
+    # Fallback to 465
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=12) as server:
         server.login(sender, app_pw)
         server.send_message(msg)
