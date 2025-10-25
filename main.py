@@ -1,9 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from typing import List
-import smtplib, ssl, os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import os, requests
 
 app = FastAPI()
 
@@ -19,35 +17,47 @@ def home():
     return {"message": "Server is running!"}
 
 @app.post("/lead")
-def capture_lead(lead: Lead):
+def capture_lead(lead: Lead, background_tasks: BackgroundTasks):
+    # store
     leads.append(lead)
-    send_email_notification(lead)
+    # send only primitives to background task
+    background_tasks.add_task(send_whatsapp_notification_safe, lead.dict())
     return {"status": "success", "message": f"Lead captured for {lead.name}"}
 
 @app.get("/leads")
 def list_leads():
-    return {"total": len(leads), "data": leads}
+    return {"total": len(leads), "data": [l.dict() for l in leads]}
 
-def send_email_notification(lead: Lead):
-    sender = os.getenv("OWNER_EMAIL")
-    password = os.getenv("GMAIL_APP_PASSWORD")
-    receiver = sender
+def send_whatsapp_notification_safe(lead_data: dict):
+    try:
+        send_whatsapp_notification(lead_data)
+    except Exception as e:
+        print(f"[whatsapp error] {e}")
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"New Lead from {lead.name}"
-    msg["From"] = sender
-    msg["To"] = receiver
+def send_whatsapp_notification(lead_data: dict):
+    token    = os.getenv("WHATSAPP_TOKEN")
+    phone_id = os.getenv("WHATSAPP_PHONE_ID")
+    owner    = os.getenv("OWNER_PHONE_E164")
+    if not token or not phone_id or not owner:
+        raise RuntimeError("WhatsApp env vars not set")
 
-    text = f"""
-    New lead captured:
+    url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+    body_text = (
+        "📥 *New Lead Captured*\n"
+        f"*Name:* {lead_data.get('name')}\n"
+        f"*Phone:* {lead_data.get('phone')}\n"
+        f"*Message:* {lead_data.get('message')}"
+    )
 
-    Name: {lead.name}
-    Phone: {lead.phone}
-    Message: {lead.message}
-    """
-    msg.attach(MIMEText(text, "plain"))
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": owner,
+        "type": "text",
+        "text": {"preview_url": False, "body": body_text}
+    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(sender, password)
-        server.send_message(msg)
+    # short timeout so we never hang
+    r = requests.post(url, headers=headers, json=payload, timeout=5)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WA send failed: {r.status_code} {r.text}")
