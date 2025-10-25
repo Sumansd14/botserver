@@ -65,3 +65,12 @@ def send_email_notification(data: dict):
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=10) as server:
         server.login(sender, app_pw)
         server.send_message(msg)
+
+@app.get("/env-check")
+def env_check():
+    import os
+    return {
+        "owner_email_set": bool(os.getenv("OWNER_EMAIL")),
+        "app_password_set": bool(os.getenv("GMAIL_APP_PASSWORD")),
+        "send_email": os.getenv("SEND_EMAIL")
+    }        
