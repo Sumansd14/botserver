@@ -93,32 +93,26 @@ def send_email_safe(data: dict):
     except Exception as e:
         log.error(f"[email error] {e}")
 
+import os, requests
+
 def send_email_notification(data: dict):
-    sender = os.getenv("OWNER_EMAIL")
-    app_pw = os.getenv("GMAIL_APP_PASSWORD")
-    if not sender or not app_pw:
-        raise RuntimeError("Email env vars not set")
+    url = os.getenv("MAILER_URL")
+    secret = os.getenv("MAILER_SECRET")
+    if not url or not secret:
+        raise RuntimeError("Mailer config not set")
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"New Lead from {data.get('name', '')}"
-    msg["From"] = sender
-    msg["To"] = sender
-
-    text = f"New lead captured:\\n\\nName: {data.get('name')}\\nPhone: {data.get('phone')}\\nMessage: {data.get('message')}\\n"
-    msg.attach(MIMEText(text, "plain"))
-
-    ctx = ssl.create_default_context()
-    # Try port 587 first
-    try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=12) as server:
-            server.ehlo()
-            server.starttls(context=ctx)
-            server.login(sender, app_pw)
-            server.send_message(msg)
-        return
-    except OSError as e:
-        log.warning(f"[email warn] 587 failed: {e}")
-    # Fallback to 465
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=12) as server:
-        server.login(sender, app_pw)
-        server.send_message(msg)
+    r = requests.post(
+        url,
+        json={
+            "name": data.get("name"),
+            "phone": data.get("phone"),
+            "message": data.get("message")
+        },
+        headers={
+            "X-Mailer-Secret": secret,
+            "Content-Type": "application/json"
+        },
+        timeout=8,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Mailer failed: {r.status_code} {r.text}")
