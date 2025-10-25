@@ -1,7 +1,9 @@
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
-from typing import List
-import os, requests
+from typing import List, Dict, Any
+import os, ssl, smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = FastAPI()
 
@@ -10,7 +12,8 @@ class Lead(BaseModel):
     phone: str
     message: str
 
-leads: List[Lead] = []
+# store plain dicts (keeps it simple and serializable)
+leads: List[Dict[str, Any]] = []
 
 @app.get("/")
 def home():
@@ -18,46 +21,47 @@ def home():
 
 @app.post("/lead")
 def capture_lead(lead: Lead, background_tasks: BackgroundTasks):
-    # store
-    leads.append(lead)
-    # send only primitives to background task
-    background_tasks.add_task(send_whatsapp_notification_safe, lead.dict())
+    data = {"name": lead.name, "phone": lead.phone, "message": lead.message}
+    leads.append(data)
+
+    if os.getenv("SEND_EMAIL", "0") in ("1", "true", "TRUE"):
+        # fire-and-forget so the API responds instantly
+        background_tasks.add_task(send_email_safe, data)
+
     return {"status": "success", "message": f"Lead captured for {lead.name}"}
 
 @app.get("/leads")
 def list_leads():
-    return {"total": len(leads), "data": [l.dict() for l in leads]}
+    return {"total": len(leads), "data": leads}
 
-def send_whatsapp_notification_safe(lead_data: dict):
+def send_email_safe(data: dict):
     try:
-        send_whatsapp_notification(lead_data)
+        send_email_notification(data)
     except Exception as e:
-        print(f"[whatsapp error] {e}")
+        # Don't crash the app; check Render logs if email fails
+        print(f"[email error] {e}")
 
-def send_whatsapp_notification(lead_data: dict):
-    token    = os.getenv("WHATSAPP_TOKEN")
-    phone_id = os.getenv("WHATSAPP_PHONE_ID")
-    owner    = os.getenv("OWNER_PHONE_E164")
-    if not token or not phone_id or not owner:
-        raise RuntimeError("WhatsApp env vars not set")
+def send_email_notification(data: dict):
+    sender = os.getenv("OWNER_EMAIL")
+    app_pw  = os.getenv("GMAIL_APP_PASSWORD")
+    if not sender or not app_pw:
+        raise RuntimeError("Email env vars not set")
 
-    url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
-    body_text = (
-        "📥 *New Lead Captured*\n"
-        f"*Name:* {lead_data.get('name')}\n"
-        f"*Phone:* {lead_data.get('phone')}\n"
-        f"*Message:* {lead_data.get('message')}"
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"New Lead from {data.get('name','')}"
+    msg["From"] = sender
+    msg["To"] = sender
+
+    text = (
+        "New lead captured:\n\n"
+        f"Name: {data.get('name')}\n"
+        f"Phone: {data.get('phone')}\n"
+        f"Message: {data.get('message')}\n"
     )
+    msg.attach(MIMEText(text, "plain"))
 
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": owner,
-        "type": "text",
-        "text": {"preview_url": False, "body": body_text}
-    }
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-    # short timeout so we never hang
-    r = requests.post(url, headers=headers, json=payload, timeout=5)
-    if r.status_code >= 300:
-        raise RuntimeError(f"WA send failed: {r.status_code} {r.text}")
+    context = ssl.create_default_context()
+    # timeout so it never stalls the worker
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=10) as server:
+        server.login(sender, app_pw)
+        server.send_message(msg)
